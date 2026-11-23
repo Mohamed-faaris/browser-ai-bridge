@@ -8,10 +8,10 @@ import {
 } from "../../src/acp/toolProtocol.js";
 
 function envelope(tool, args, id = "call-1") {
-  return "```web_ai_tools\\n" + JSON.stringify({
+  return "```web_ai_tools\n" + JSON.stringify({
     protocol: "web-ai-tools/v1",
     tool_calls: [{ id, tool, arguments: args }],
-  }) + "\\n```";
+  }) + "\n```";
 }
 
 test("plain text is treated as a final answer", () => {
@@ -40,13 +40,13 @@ test("tool calls require the exact protocol envelope", () => {
 });
 
 test("duplicate tool-call IDs are rejected", () => {
-  const block = "```web_ai_tools\\n" + JSON.stringify({
+  const block = "```web_ai_tools\n" + JSON.stringify({
     protocol: "web-ai-tools/v1",
     tool_calls: [
       { id: "same", tool: "read_file", arguments: { path: "a" } },
       { id: "same", tool: "read_file", arguments: { path: "b" } },
     ],
-  }) + "\\n```";
+  }) + "\n```";
   assert.throws(() => parseWebToolResponse(block), /Duplicate tool call id/);
 });
 
@@ -72,8 +72,8 @@ test("write and command tools require explicit environment opt-in", () => {
 test("coding prompt advertises only enabled tools", () => {
   const prompt = buildCodingPrompt("/workspace/project", "Fix the tests.", new Set(["read_file"]));
   assert.match(prompt, /read_file/);
-  assert.doesNotMatch(prompt, /write_file\\(/);
-  assert.doesNotMatch(prompt, /run_command\\(/);
+  assert.doesNotMatch(prompt, /write_file\(/);
+  assert.doesNotMatch(prompt, /run_command\(/);
 });
 
 test("tool results are truncated to fit a configured prompt budget", () => {
