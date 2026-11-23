@@ -518,6 +518,23 @@ export class BrowserAiAcpAgent {
       : `${providerName} did not return a successful response.`;
   }
 
+  async closeSession(params) {
+    const session = this.sessions.get(params.sessionId);
+    if (session) {
+      if (session.activeTurn) {
+        session.activeTurn.cancelled = true;
+        session.activeTurn.controller.abort(new Error("ACP session closed."));
+      }
+      await this.releaseProviderSession(session, { forceClose: true });
+      this.sessions.delete(params.sessionId);
+    }
+    return {};
+  }
+
+  async deleteSession(params) {
+    return this.closeSession(params);
+  }
+
   async shutdown() {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
