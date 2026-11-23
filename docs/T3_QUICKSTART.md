@@ -46,7 +46,8 @@ Keep T3's thread permission mode at **Supervised** while testing. Every write an
 - Provider output is collected by the existing browser bridge before the ACP message is sent; true incremental token streaming is not implemented.
 - Only `read_file`, `write_file` and `run_command` are in the new coding tool protocol.
 - `write_file` and `run_command` are disabled by default.
-- `run_command` uses argv with `shell:false`, but it is **not an OS sandbox**. An approved executable can still access host resources using the gateway process's OS permissions. Enable it only when trusted and with T3 Supervised approvals.
+- `run_command` uses argv with `shell:false`, but it is **not an OS sandbox**. An approved executable can still access host resources and environment variables available to the gateway process. It runs with the gateway user's OS permissions. Enable it only when trusted and with T3 Supervised approvals.
+- File reads/writes reject path traversal, symlink escapes and files with multiple hard links. These checks reduce common path escapes but do not turn a normal process into a hardened OS sandbox.
 - No local tests or live T3 handshake have been run from this environment yet.
 
 ---
