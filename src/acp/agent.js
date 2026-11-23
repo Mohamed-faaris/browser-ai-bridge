@@ -13,7 +13,7 @@ import {
   parseWebToolResponse,
   resolveEnabledTools,
 } from "./toolProtocol.js";
-import { executeWorkspaceTool } from "./toolExecutor.js";
+import { executeWorkspaceTool, validateWorkspaceToolTarget } from "./toolExecutor.js";
 
 const AGENT_NAME = "Browser AI Bridge";
 const AGENT_VERSION = "0.2.0";
@@ -152,7 +152,6 @@ export class BrowserAiAcpAgent {
         const response = await providerSession.engine.sendPromptAndWait(
           outboundPrompt,
           `ACP turn ${session.turnNumber} / model round ${round}`,
-          providerSession.id,
         );
 
         if (!response?.ok) {
@@ -257,6 +256,29 @@ export class BrowserAiAcpAgent {
       locations,
       rawInput,
     });
+
+    // Validate write targets before presenting the permission request. This is
+    // preflight only; executeWorkspaceTool repeats all checks immediately before
+    // the actual write to limit path-race exposure.
+    if (call.tool === "write_file") {
+      try {
+        await validateWorkspaceToolTarget(call, session.cwd);
+      } catch (error) {
+        const failed = {
+          id: call.id,
+          tool: call.tool,
+          status: "failed",
+          output: error?.message || String(error),
+        };
+        await this.updateToolCall(client, session.id, {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: "failed",
+          rawOutput: failed,
+        });
+        return failed;
+      }
+    }
 
     if (mutating) {
       try {
