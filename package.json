@@ -34,7 +34,8 @@
     "./server": "./src/server.js"
   },
   "bin": {
-    "browser-ai-bridge": "./bin/browser-ai-bridge.js"
+    "browser-ai-bridge": "./bin/browser-ai-bridge.js",
+    "browser-ai-acp": "./bin/acp.js"
   },
   "files": [
     "src/",
@@ -58,7 +59,8 @@
     "audit:fix": "node src/audit/fix.js",
     "check:reachable": "node scripts/check-reachable.cjs",
     "check:docs": "node scripts/doc-check.mjs",
-    "census:provenance": "node scripts/provenance-census.mjs"
+    "census:provenance": "node scripts/provenance-census.mjs",
+    "acp": "node src/acp/index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
@@ -66,7 +68,8 @@
     "helmet": "^7.1.0",
     "pino": "^8.19.0",
     "pino-pretty": "^10.3.1",
-    "playwright-core": "^1.42.1"
+    "playwright-core": "^1.42.1",
+    "@agentclientprotocol/sdk": "^2.9.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
