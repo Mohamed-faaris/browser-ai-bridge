@@ -130,6 +130,8 @@ export class BrowserAiAcpAgent {
     const activeTurn = { cancelled: false, controller: new AbortController() };
     session.activeTurn = activeTurn;
     session.turnNumber += 1;
+    session.history.push({ role: "user", content: userPrompt });
+    this.trimHistory(session);
 
     let providerSession = null;
     try {
@@ -167,7 +169,6 @@ export class BrowserAiAcpAgent {
           const protocolError =
             `I stopped because the model returned an invalid or ambiguous tool protocol. No requested tool was executed. Details: ${error.message}`;
           await this.sendAssistantText(client, session.id, protocolError);
-          session.history.push({ role: "user", content: userPrompt });
           session.history.push({ role: "assistant", content: protocolError });
           return { stopReason: "end_turn" };
         }
@@ -175,7 +176,6 @@ export class BrowserAiAcpAgent {
         if (parsed.type === "final") {
           const finalText = parsed.text || "(The provider returned an empty response.)";
           await this.sendAssistantText(client, session.id, finalText);
-          session.history.push({ role: "user", content: userPrompt });
           session.history.push({ role: "assistant", content: finalText });
           this.trimHistory(session);
           session.pendingHandoff = null;
@@ -372,7 +372,12 @@ export class BrowserAiAcpAgent {
       const completed = {
         id: call.id,
         tool: call.tool,
-        status: value?.status === "cancelled" ? "cancelled" : "completed",
+        status:
+          value?.status === "completed"
+            ? "completed"
+            : value?.status === "timeout"
+              ? "timeout"
+              : "cancelled",
         output: JSON.stringify(value),
       };
       await this.updateToolCall(client, session.id, {
