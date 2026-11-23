@@ -140,7 +140,7 @@ export class BrowserAiAcpAgent {
 
       let outboundPrompt = buildCodingPrompt(session.cwd, userPrompt, this.enabledTools);
       if (session.pendingHandoff) {
-        const handoffBudget = Math.max(0, maxPromptChars - userPrompt.length - outboundPrompt.length - 2);
+        const handoffBudget = maxPromptChars > 0 ? Math.max(0, maxPromptChars - outboundPrompt.length - 2) : 6000;
         outboundPrompt = `${session.pendingHandoff.slice(0, handoffBudget)}\n\n${outboundPrompt}`;
       }
 
