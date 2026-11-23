@@ -49,7 +49,9 @@ async function resolveWriteTarget(root, relativePath) {
 function pushBounded(chunks, state, chunk, maxBytes) {
   const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
   chunks.push(text);
-  state.bytes += Buffer.byteLength(text);
+  const chunkBytes = Buffer.byteLength(text);
+  state.bytes += chunkBytes;
+  state.totalBytes += chunkBytes;
   while (state.bytes > maxBytes && chunks.length) {
     const removed = chunks.shift();
     state.bytes -= Buffer.byteLength(removed);
@@ -60,7 +62,7 @@ async function runCommand(args, cwd, signal) {
   const timeoutMs = args.timeout_ms ?? 60000;
   const maxOutputBytes = 64 * 1024;
   const output = [];
-  const outputState = { bytes: 0 };
+  const outputState = { bytes: 0, totalBytes: 0 };
 
   if (signal.aborted) throw new Error("Command cancelled before it started.");
 
@@ -86,7 +88,7 @@ async function runCommand(args, cwd, signal) {
     const onAbort = () => {
       if (!child.killed) child.kill("SIGTERM");
       const killTimer = setTimeout(() => {
-        if (child.exitCode === null && !child.killed) child.kill("SIGKILL");
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       }, 1500);
       killTimer.unref?.();
     };
@@ -110,7 +112,7 @@ async function runCommand(args, cwd, signal) {
         exitCode: code,
         signal: exitSignal,
         output: text,
-        truncated: outputState.bytes >= maxOutputBytes,
+        truncated: outputState.totalBytes > maxOutputBytes,
         command: args.command,
         args: args.args,
       });
