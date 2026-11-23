@@ -71,7 +71,9 @@ export function parseWebToolResponse(responseText, { enabledTools = null } = {})
     ids.add(id);
     const tool = requireString(call.tool, `tool_calls[${index}].tool`, 64);
     if (enabledTools && !enabledTools.has(tool)) {
-      throw new TypeError(`Tool ${tool} is disabled. Enable it explicitly in the gateway environment before use.`);\n    }\n    const args = call.arguments;\n    if (!args || typeof args !== "object" || Array.isArray(args)) {
+      throw new TypeError(`Tool ${tool} is disabled. Enable it explicitly in the gateway environment before use.`);
+    }
+    const args = call.arguments;\n    if (!args || typeof args !== "object" || Array.isArray(args)) {
       throw new TypeError(`Arguments for ${tool} must be an object.`);
     }
 
