@@ -1,15 +1,17 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
-  buildCodingPrompt,
   buildHandoffPrompt,
-  formatWebToolResults,
   listProviderModes,
   parsePromptText,
-  parseWebToolResponse,
   resolveDefaultProvider,
   validateWorkingDirectory,
 } from "./helpers.js";
+import {
+  buildCodingPrompt,
+  formatWebToolResults,
+  parseWebToolResponse,
+} from "./toolProtocol.js";
 import { executeWorkspaceTool } from "./toolExecutor.js";
 
 const AGENT_NAME = "Browser AI Bridge";
