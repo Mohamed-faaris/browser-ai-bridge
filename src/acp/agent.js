@@ -32,7 +32,8 @@ export class BrowserAiAcpAgent {
     this.connectToBrowser = connectToBrowser;
     this.sessionManager = sessionManager;
     this.providerConfig = providerConfig;
-    this.providerModes = listProviderModes(providerConfig, providerFilter);\n    this.enabledTools = resolveEnabledTools();
+    this.providerModes = listProviderModes(providerConfig, providerFilter);
+    this.enabledTools = resolveEnabledTools();
     this.defaultProvider = resolveDefaultProvider(this.providerModes, defaultProvider);
     this.sessions = new Map();
     this.browserReady = null;
