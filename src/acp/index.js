@@ -78,7 +78,8 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 }
 
 try {
-  await agent.connect(stream);
+  const connection = agent.connect(stream);
+  await connection.closed;
 } catch (error) {
   process.stderr.write(`[ACP] Gateway transport failed: ${error?.stack || error}\n`);
   process.exitCode = 1;
