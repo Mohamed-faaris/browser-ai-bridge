@@ -41,6 +41,12 @@ const agent = acp
   .onRequest(acp.methods.agent.session.setMode, ({ params }) =>
     implementation.setSessionMode(params),
   )
+  .onRequest(acp.methods.agent.session.close, ({ params }) =>
+    implementation.closeSession(params),
+  )
+  .onRequest(acp.methods.agent.session.delete, ({ params }) =>
+    implementation.deleteSession(params),
+  )
   .onRequest(acp.methods.agent.session.prompt, ({ params, client }) =>
     implementation.prompt(params, client),
   )
