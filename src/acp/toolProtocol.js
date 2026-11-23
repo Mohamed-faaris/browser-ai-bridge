@@ -1,7 +1,7 @@
 const PROTOCOL = "web-ai-tools/v1";
 const MAX_TOOL_CALLS = 6;
 const MAX_PATH_CHARS = 2048;
-const MAX_CONTENT_CHARS = 256_000;
+const MAX_CONTENT_CHARS = 64_000;
 
 function exactKeys(value, allowed, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -77,7 +77,7 @@ export function parseWebToolResponse(responseText) {
         exactKeys(args, ["path", "content"], `Arguments for ${tool}`);
         requireString(args.path, "path", MAX_PATH_CHARS);
         if (typeof args.content !== "string" || args.content.length > MAX_CONTENT_CHARS) {
-          throw new TypeError("content must be a string no longer than 256000 characters.");
+          throw new TypeError("content must be a string no longer than 64000 characters.");
         }
         break;
       case "run_command":
@@ -109,8 +109,8 @@ export function buildCodingPrompt(cwd, userPrompt) {
     "You may inspect or modify project files and run commands only by returning the strict tool protocol below. Do not claim that an operation was performed unless its tool result is returned.",
     "Available tools:",
     "1. read_file({path}) — read a UTF-8 file relative to the project directory. Reads are workspace-scoped.",
-    "2. write_file({path, content}) — create or replace a UTF-8 file relative to the project directory. This requires user approval in T3.",
-    "3. run_command({command, args, timeout_ms?}) — execute a program with an argument array in the project directory (no shell interpolation). This requires user approval in T3.",
+    "2. write_file({path, content}) — create or replace a UTF-8 file relative to the project directory. This is sent through the ACP permission flow; T3 applies the thread's permission policy.",
+    "3. run_command({command, args, timeout_ms?}) — execute a program with an argument array in the project directory (no shell interpolation). This is sent through the ACP permission flow; T3 applies the thread's permission policy.",
     "When you need tools, respond with exactly one fenced web_ai_tools block and no surrounding prose:",
     "```web_ai_tools",
     JSON.stringify({
@@ -128,11 +128,34 @@ export function buildCodingPrompt(cwd, userPrompt) {
   ].join("\n");
 }
 
-export function formatWebToolResults(results) {
+export function formatWebToolResults(results, maxChars = 60000) {
+  const entries = results.map((result) => ({
+    id: result.id,
+    tool: result.tool,
+    status: result.status,
+    output: String(result.output ?? ""),
+  }));
+  const envelope = () => JSON.stringify({ protocol: PROTOCOL, results: entries }, null, 2);
+  let serialized = envelope();
+
+  while (serialized.length > maxChars) {
+    let largest = -1;
+    for (let index = 0; index < entries.length; index += 1) {
+      if (largest === -1 || entries[index].output.length > entries[largest].output.length) {
+        largest = index;
+      }
+    }
+    if (largest === -1 || entries[largest].output.length < 128) break;
+    const keep = Math.max(128, Math.floor(entries[largest].output.length * 0.65));
+    entries[largest].output =
+      entries[largest].output.slice(0, keep) + "\n[tool output truncated to fit provider prompt budget]";
+    serialized = envelope();
+  }
+
   return [
     "Tool execution results follow. They are authoritative. Continue the task using these results.",
     "```web_ai_tool_results",
-    JSON.stringify({ protocol: PROTOCOL, results }, null, 2),
+    serialized,
     "```",
     "Return another web_ai_tools block if additional operations are needed, otherwise provide the final answer.",
   ].join("\n");
