@@ -1,14 +1,20 @@
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
+  buildCodingPrompt,
   buildHandoffPrompt,
+  formatWebToolResults,
   listProviderModes,
   parsePromptText,
+  parseWebToolResponse,
   resolveDefaultProvider,
   validateWorkingDirectory,
 } from "./helpers.js";
+import { executeWorkspaceTool } from "./toolExecutor.js";
 
 const AGENT_NAME = "Browser AI Bridge";
-const AGENT_VERSION = "0.1.0";
+const AGENT_VERSION = "0.2.0";
+const MAX_TOOL_ROUNDS = 8;
 
 export class BrowserAiAcpAgent {
   constructor({
@@ -24,10 +30,7 @@ export class BrowserAiAcpAgent {
     this.sessionManager = sessionManager;
     this.providerConfig = providerConfig;
     this.providerModes = listProviderModes(providerConfig, providerFilter);
-    this.defaultProvider = resolveDefaultProvider(
-      this.providerModes,
-      defaultProvider,
-    );
+    this.defaultProvider = resolveDefaultProvider(this.providerModes, defaultProvider);
     this.sessions = new Map();
     this.browserReady = null;
     this.shuttingDown = false;
@@ -66,7 +69,7 @@ export class BrowserAiAcpAgent {
   }
 
   authenticate() {
-    // Provider website login is performed manually in the persistent Chrome profile.
+    // Website authentication is performed manually in the dedicated Chrome profile.
     return {};
   }
 
@@ -89,11 +92,7 @@ export class BrowserAiAcpAgent {
     if (nextProvider === session.providerId) return {};
 
     const previousProvider = session.providerId;
-    session.pendingHandoff = buildHandoffPrompt(
-      session.history,
-      previousProvider,
-      nextProvider,
-    );
+    session.pendingHandoff = buildHandoffPrompt(session.history, previousProvider, nextProvider);
     await this.releaseProviderSession(session);
     session.providerId = nextProvider;
     return {};
@@ -112,22 +111,19 @@ export class BrowserAiAcpAgent {
     try {
       userPrompt = parsePromptText(params.prompt);
     } catch (error) {
-      throw this.acp.RequestError.invalidParams(
-        { sessionId: session.id },
-        error.message,
-      );
+      throw this.acp.RequestError.invalidParams({ sessionId: session.id }, error.message);
     }
 
     const provider = this.providerConfig[session.providerId];
     const maxPromptChars = Number(provider?.maxPromptChars || 0);
-    if (maxPromptChars > 0 && userPrompt.length > maxPromptChars) {
+    if (maxPromptChars > 0 && userPrompt.length > maxPromptChars - 2500) {
       throw this.acp.RequestError.invalidParams(
         { length: userPrompt.length, maxPromptChars },
-        `${provider.name} accepts at most ${maxPromptChars} characters per prompt.`,
+        `${provider.name} requires space for the gateway instructions; keep the task below ${Math.max(0, maxPromptChars - 2500)} characters.`,
       );
     }
 
-    const activeTurn = { cancelled: false };
+    const activeTurn = { cancelled: false, controller: new AbortController() };
     session.activeTurn = activeTurn;
     session.turnNumber += 1;
 
@@ -138,61 +134,88 @@ export class BrowserAiAcpAgent {
       providerSession.lockedAt = Date.now();
       providerSession.clientGone = false;
 
-      let outboundPrompt = userPrompt;
+      let outboundPrompt = buildCodingPrompt(session.cwd, userPrompt);
       if (session.pendingHandoff) {
-        const handoffBudget = Math.max(
-          0,
-          maxPromptChars > 0 ? maxPromptChars - userPrompt.length - 2 : 6000,
-        );
-        outboundPrompt = `${session.pendingHandoff.slice(0, handoffBudget)}\n\n${userPrompt}`;
+        const handoffBudget = Math.max(0, maxPromptChars - userPrompt.length - outboundPrompt.length - 2);
+        outboundPrompt = `${session.pendingHandoff.slice(0, handoffBudget)}\n\n${outboundPrompt}`;
       }
 
-      const result = await providerSession.engine.sendPromptAndWait(
-        outboundPrompt,
-        `ACP turn ${session.turnNumber}`,
-        providerSession.id,
-      );
-
-      if (activeTurn.cancelled) return { stopReason: "cancelled" };
-
-      const assistantText = result?.ok
-        ? String(result.text || "")
-        : this.describeProviderFailure(session.providerId, result);
-
-      if (result?.ok) {
-        session.history.push({ role: "user", content: userPrompt });
-        session.history.push({ role: "assistant", content: assistantText });
-        // Keep a bounded handoff transcript; the website conversation itself remains
-        // the primary context while the provider session is healthy.
-        if (session.history.length > 16) {
-          session.history.splice(0, session.history.length - 16);
+      for (let round = 1; round <= MAX_TOOL_ROUNDS; round += 1) {
+        if (activeTurn.cancelled || activeTurn.controller.signal.aborted) {
+          return { stopReason: "cancelled" };
         }
-        session.pendingHandoff = null;
+
+        const response = await providerSession.engine.sendPromptAndWait(
+          outboundPrompt,
+          `ACP turn ${session.turnNumber} / model round ${round}`,
+          providerSession.id,
+        );
+
+        if (!response?.ok) {
+          const failureText = this.describeProviderFailure(session.providerId, response);
+          await this.sendAssistantText(client, session.id, failureText);
+          return { stopReason: "end_turn" };
+        }
+
+        let parsed;
+        try {
+          parsed = parseWebToolResponse(response.text);
+        } catch (error) {
+          const protocolError =
+            `I stopped because the model returned an invalid or ambiguous tool protocol. No requested tool was executed. Details: ${error.message}`;
+          await this.sendAssistantText(client, session.id, protocolError);
+          session.history.push({ role: "user", content: userPrompt });
+          session.history.push({ role: "assistant", content: protocolError });
+          return { stopReason: "end_turn" };
+        }
+
+        if (parsed.type === "final") {
+          const finalText = parsed.text || "(The provider returned an empty response.)";
+          await this.sendAssistantText(client, session.id, finalText);
+          session.history.push({ role: "user", content: userPrompt });
+          session.history.push({ role: "assistant", content: finalText });
+          this.trimHistory(session);
+          session.pendingHandoff = null;
+          return { stopReason: "end_turn" };
+        }
+
+        const results = [];
+        for (const call of parsed.calls) {
+          if (activeTurn.cancelled || activeTurn.controller.signal.aborted) {
+            return { stopReason: "cancelled" };
+          }
+          const result = await this.runToolCall(session, client, call, activeTurn);
+          results.push(result);
+        }
+
+        session.history.push({
+          role: "assistant",
+          content: JSON.stringify({ tool_calls: parsed.calls.map(({ id, tool, arguments: args }) => ({ id, tool, arguments: args })) }),
+        });
+        session.history.push({
+          role: "assistant",
+          content: JSON.stringify({ tool_results: results }),
+        });
+        this.trimHistory(session);
+        outboundPrompt = formatWebToolResults(
+          results,
+          maxPromptChars > 0 ? Math.max(2000, maxPromptChars - 2500) : 60000,
+        );
       }
 
-      await client.notify(this.acp.methods.client.session.update, {
-        sessionId: session.id,
-        update: {
-          sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: assistantText || "(The provider returned an empty response.)" },
-        },
-      });
-
-      return { stopReason: result?.ok ? "end_turn" : "refusal" };
+      const limitMessage = `Stopped after ${MAX_TOOL_ROUNDS} tool rounds to avoid an unbounded autonomous loop. Review the tool results and send a follow-up to continue.`;
+      await this.sendAssistantText(client, session.id, limitMessage);
+      session.history.push({ role: "assistant", content: limitMessage });
+      this.trimHistory(session);
+      return { stopReason: "end_turn" };
     } catch (error) {
-      if (activeTurn.cancelled) return { stopReason: "cancelled" };
+      if (activeTurn.cancelled || activeTurn.controller.signal.aborted) {
+        return { stopReason: "cancelled" };
+      }
 
       const message = `Browser AI Gateway error: ${error?.message || String(error)}`;
-      await client
-        .notify(this.acp.methods.client.session.update, {
-          sessionId: session.id,
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: message },
-          },
-        })
-        .catch(() => {});
-      return { stopReason: "refusal" };
+      await this.sendAssistantText(client, session.id, message).catch(() => {});
+      return { stopReason: "end_turn" };
     } finally {
       if (providerSession) {
         providerSession.locked = false;
@@ -202,15 +225,194 @@ export class BrowserAiAcpAgent {
     }
   }
 
+  async runToolCall(session, client, call, activeTurn) {
+    const toolCallId = randomUUID();
+    const mutating = call.tool === "write_file" || call.tool === "run_command";
+    const kind = call.tool === "read_file" ? "read" : call.tool === "write_file" ? "edit" : "execute";
+    const title = call.tool === "read_file"
+      ? `Read ${call.arguments.path}`
+      : call.tool === "write_file"
+        ? `Write ${call.arguments.path}`
+        : `Run ${call.arguments.command}`;
+    const locations = call.tool === "run_command"
+      ? []
+      : [{ path: path.resolve(session.cwd, call.arguments.path) }];
+    const rawInput = {
+      tool: call.tool,
+      arguments: call.arguments,
+      workingDirectory: session.cwd,
+    };
+
+    await this.updateToolCall(client, session.id, {
+      sessionUpdate: "tool_call",
+      toolCallId,
+      name: call.tool,
+      title,
+      kind,
+      status: "pending",
+      locations,
+      rawInput,
+    });
+
+    if (mutating) {
+      try {
+        const permission = await client.request(
+          this.acp.methods.client.session.requestPermission,
+          {
+            sessionId: session.id,
+            toolCall: {
+              toolCallId,
+              name: call.tool,
+              title,
+              kind,
+              status: "pending",
+              locations,
+              rawInput,
+            },
+            options: [
+              { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+              { optionId: "reject_once", name: "Reject", kind: "reject_once" },
+            ],
+          },
+          {
+            cancellationSignal: activeTurn.controller.signal,
+            stopWaitingOnCancel: true,
+          },
+        );
+
+        const allowed =
+          permission?.outcome?.outcome === "selected" &&
+          permission.outcome.optionId === "allow_once";
+
+        if (!allowed) {
+          const denied = {
+            id: call.id,
+            tool: call.tool,
+            status: "denied",
+            output: "The user did not approve this operation. It was not executed.",
+          };
+          await this.updateToolCall(client, session.id, {
+            sessionUpdate: "tool_call_update",
+            toolCallId,
+            status: "failed",
+            rawOutput: denied,
+          });
+          return denied;
+        }
+      } catch (error) {
+        const cancelled = activeTurn.controller.signal.aborted;
+        const failed = {
+          id: call.id,
+          tool: call.tool,
+          status: cancelled ? "cancelled" : "permission_error",
+          output: cancelled
+            ? "The permission request was cancelled. The operation was not executed."
+            : `Permission request failed: ${error?.message || String(error)}. The operation was not executed.`,
+        };
+        await this.updateToolCall(client, session.id, {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: "failed",
+          rawOutput: failed,
+        }).catch(() => {});
+        return failed;
+      }
+    }
+
+    if (activeTurn.controller.signal.aborted) {
+      const cancelled = {
+        id: call.id,
+        tool: call.tool,
+        status: "cancelled",
+        output: "The operation was cancelled before execution.",
+      };
+      await this.updateToolCall(client, session.id, {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "failed",
+        rawOutput: cancelled,
+      }).catch(() => {});
+      return cancelled;
+    }
+
+    await this.updateToolCall(client, session.id, {
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status: "in_progress",
+    });
+
+    try {
+      const value = await executeWorkspaceTool(call, session.cwd, activeTurn.controller.signal);
+      const completed = {
+        id: call.id,
+        tool: call.tool,
+        status: value?.status === "cancelled" ? "cancelled" : "completed",
+        output: JSON.stringify(value),
+      };
+      await this.updateToolCall(client, session.id, {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: completed.status === "completed" ? "completed" : "failed",
+        content: [{
+          type: "content",
+          content: { type: "text", text: completed.output.slice(0, 16000) },
+        }],
+        rawOutput: completed,
+      });
+      return completed;
+    } catch (error) {
+      const failed = {
+        id: call.id,
+        tool: call.tool,
+        status: "failed",
+        output: error?.message || String(error),
+      };
+      await this.updateToolCall(client, session.id, {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "failed",
+        content: [{
+          type: "content",
+          content: { type: "text", text: failed.output },
+        }],
+        rawOutput: failed,
+      });
+      return failed;
+    }
+  }
+
+  async updateToolCall(client, sessionId, update) {
+    return client.notify(this.acp.methods.client.session.update, {
+      sessionId,
+      update,
+    });
+  }
+
+  async sendAssistantText(client, sessionId, text) {
+    return client.notify(this.acp.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: String(text || "") },
+      },
+    });
+  }
+
+  trimHistory(session) {
+    if (session.history.length > 24) {
+      session.history.splice(0, session.history.length - 24);
+    }
+  }
+
   async cancel(params) {
     const session = this.sessions.get(params.sessionId);
     if (!session?.activeTurn) return;
 
     session.activeTurn.cancelled = true;
-    // Closing the provider tab is the conservative cancellation mechanism available
-    // in the existing browser engine. The next ACP turn creates a fresh browser
-    // session instead of risking reuse of a page still generating.
-    await this.releaseProviderSession(session);
+    session.activeTurn.controller.abort(new Error("ACP session cancelled."));
+    // Force-close the browser page so a provider generation cannot be recycled
+    // into another session while its previous turn is still active.
+    await this.releaseProviderSession(session, { forceClose: true });
   }
 
   requireSession(sessionId) {
@@ -220,6 +422,7 @@ export class BrowserAiAcpAgent {
   }
 
   async ensureBrowser() {
+    if (this.shuttingDown) throw new Error("The ACP gateway is shutting down.");
     if (!this.browserReady) {
       this.browserReady = this.connectToBrowser().catch((error) => {
         this.browserReady = null;
@@ -247,9 +450,7 @@ export class BrowserAiAcpAgent {
           );
         }
       }
-      session.providerSessionId = await this.sessionManager.createSession(
-        session.providerId,
-      );
+      session.providerSessionId = await this.sessionManager.createSession(session.providerId);
       providerSession = this.sessionManager.getSession(session.providerSessionId);
     }
 
@@ -259,12 +460,18 @@ export class BrowserAiAcpAgent {
     return providerSession;
   }
 
-  async releaseProviderSession(session) {
+  async releaseProviderSession(session, { forceClose = false } = {}) {
     const providerSessionId = session.providerSessionId;
     session.providerSessionId = null;
-    if (providerSessionId) {
-      await this.sessionManager.closeSession(providerSessionId).catch(() => {});
+    if (!providerSessionId) return;
+
+    if (forceClose) {
+      const providerSession = this.sessionManager.getSession(providerSessionId);
+      if (providerSession?.engine?.close) {
+        await providerSession.engine.close().catch(() => {});
+      }
     }
+    await this.sessionManager.closeSession(providerSessionId).catch(() => {});
   }
 
   describeProviderFailure(providerId, result) {
@@ -284,8 +491,11 @@ export class BrowserAiAcpAgent {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     for (const session of this.sessions.values()) {
-      session.activeTurn && (session.activeTurn.cancelled = true);
-      await this.releaseProviderSession(session);
+      if (session.activeTurn) {
+        session.activeTurn.cancelled = true;
+        session.activeTurn.controller.abort(new Error("ACP gateway shutting down."));
+      }
+      await this.releaseProviderSession(session, { forceClose: true });
     }
     this.sessions.clear();
     await this.sessionManager.closeAllSessions().catch(() => {});
