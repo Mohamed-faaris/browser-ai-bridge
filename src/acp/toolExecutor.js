@@ -46,6 +46,15 @@ async function resolveWriteTarget(root, relativePath) {
   return path.join(parent, path.basename(target));
 }
 
+export async function validateWorkspaceToolTarget(call, cwd) {
+  if (call?.tool !== "write_file") {
+    throw new Error("Only write_file targets can be preflighted by this helper.");
+  }
+  const root = await workspaceRoot(cwd);
+  const filename = await resolveWriteTarget(root, call.arguments.path);
+  return { path: path.relative(root, filename) };
+}
+
 function pushBounded(chunks, state, chunk, maxBytes) {
   const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
   chunks.push(text);
