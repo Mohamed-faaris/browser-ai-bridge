@@ -3,6 +3,8 @@
 // ACP owns stdin/stdout. Set this before dynamically importing browser/provider
 // modules so their diagnostics are routed to stderr rather than corrupting NDJSON.
 process.env.BROWSER_AI_ACP = "1";
+console.log = (...args) => console.error(...args);
+console.info = (...args) => console.error(...args);
 
 import process from "node:process";
 import { Readable, Writable } from "node:stream";
