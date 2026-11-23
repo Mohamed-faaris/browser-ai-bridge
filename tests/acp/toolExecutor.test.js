@@ -77,3 +77,31 @@ test("write_file refuses to follow symlink targets", async (t) => {
   );
   assert.equal(await fs.readFile(outside, "utf8"), "keep this");
 });
+
+test("read_file and write_file reject hard links that may alias outside files", async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), "browser-ai-acp-"));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const root = path.join(parent, "project");
+  const outside = path.join(parent, "outside.txt");
+  await fs.mkdir(root);
+  await fs.writeFile(outside, "protected");
+  await fs.link(outside, path.join(root, "hard-link.txt"));
+
+  await assert.rejects(
+    executeWorkspaceTool(
+      { tool: "read_file", arguments: { path: "hard-link.txt" } },
+      root,
+      new AbortController().signal,
+    ),
+    /multiple hard links/,
+  );
+  await assert.rejects(
+    executeWorkspaceTool(
+      { tool: "write_file", arguments: { path: "hard-link.txt", content: "replace" } },
+      root,
+      new AbortController().signal,
+    ),
+    /multiple hard links/,
+  );
+  assert.equal(await fs.readFile(outside, "utf8"), "protected");
+});
