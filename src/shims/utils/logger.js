@@ -45,6 +45,10 @@ function prettyStream() {
   }
 }
 
-const stream = prettyStream();
+// ACP reserves stdout for NDJSON protocol frames; all application logs must go to stderr.
+const stream =
+  process.env.BROWSER_AI_ACP === "1"
+    ? pino.destination(2)
+    : prettyStream();
 
 export const logger = stream ? pino({ level }, stream) : pino({ level });
