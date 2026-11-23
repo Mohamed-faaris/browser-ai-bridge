@@ -149,5 +149,9 @@ Required checks before dispatch:
 - [x] argv-based `run_command` added with timeout, output cap and cancellation handling; the tool is disabled by default and is not an OS sandbox.
 - [x] File writes and commands require explicit gateway environment opt-in; read-only file access is enabled by default.
 - [ ] Context/session persistence is currently in-memory; ACP/browser mapping and tool execution journal do not yet survive process restart.
-- [ ] Tests and live T3 handshake not run in this environment; a local clone could not be fetched because this environment could not resolve github.com.
+- [x] ACP session close/delete handlers added.
+- [x] Write-target preflight now runs before asking T3 for permission, and execution repeats the path checks after approval.
+- [x] Task prompts are recorded before tool execution so provider switching can hand off an unfinished task.
+- [x] Unit tests added for allow-once writes, denied writes, path traversal, symlink escape, protocol schema and bounded tool results.
+- [ ] Tests, Prettier and live T3 handshake not run in this environment; a local clone could not be fetched because this environment could not resolve github.com.
 - Existing `/api/agent` and mock `read_file` are explicitly not considered production-ready for coding execution.
