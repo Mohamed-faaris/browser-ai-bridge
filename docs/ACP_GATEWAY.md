@@ -145,13 +145,13 @@ Required checks before dispatch:
 - [ ] ACP v2 preview negotiation not yet implemented; current agent uses stable ACP v1, which T3 documents as a supported fallback.
 - [x] Strict `web-ai-tools/v1` envelope parser and bounded tool-result handoff added.
 - [x] ACP `session/requestPermission` flow added for file writes and terminal commands; only the explicit `allow_once` response authorizes execution.
-- [x] Workspace-scoped `read_file` and `write_file` checks added, including traversal and symlink checks.
+- [x] Workspace-scoped `read_file` and `write_file` checks added, including traversal, symlink and hard-link checks.
 - [x] argv-based `run_command` added with timeout, output cap and cancellation handling; the tool is disabled by default and is not an OS sandbox.
 - [x] File writes and commands require explicit gateway environment opt-in; read-only file access is enabled by default.
 - [ ] Context/session persistence is currently in-memory; ACP/browser mapping and tool execution journal do not yet survive process restart.
 - [x] ACP session close/delete handlers added.
 - [x] Write-target preflight now runs before asking T3 for permission, and execution repeats the path checks after approval.
 - [x] Task prompts are recorded before tool execution so provider switching can hand off an unfinished task.
-- [x] Unit tests added for allow-once writes, denied writes, path traversal, symlink escape, protocol schema and bounded tool results.
+- [x] Unit tests added for allow-once writes, denied writes, path traversal, symlink escape, hard-link rejection, protocol schema and bounded tool results.
 - [ ] Tests, Prettier and live T3 handshake not run in this environment; a local clone could not be fetched because this environment could not resolve github.com.
 - Existing `/api/agent` and mock `read_file` are explicitly not considered production-ready for coding execution.
