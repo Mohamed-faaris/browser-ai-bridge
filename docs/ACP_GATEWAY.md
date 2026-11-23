@@ -1,14 +1,14 @@
 # ACP Gateway Integration Plan
 
-Status: implementation branch created; source audit in progress. This document is the gateway implementation plan, not a claim that ACP support is already implemented.
+Status: ACP v1 browser chat, provider switching, a strict tool protocol and an initial permission-gated workspace executor are committed on the feature branch. Runtime tests and a live T3 handshake have not yet been executed. This document tracks implemented behavior separately from the remaining validation work.
 
 ## Selected architecture
 
 Run this repository as a standalone local ACP agent launched by T3 Code through **Settings → Providers → Add provider → Local ACP command**.
 
 - T3 remains the coding UI and mediates ACP permission requests.
-- This gateway owns browser-backed model sessions and local coding-tool execution.
-- Each ACP session maps to a project working directory, selected web provider, browser conversation/session and durable gateway task state.
+- This gateway owns browser-backed model sessions and (when explicitly enabled) local coding-tool execution.
+- Each ACP session maps to a project working directory, selected web provider and browser conversation/session. The current ACP session map and handoff transcript are in memory; durable recovery remains unfinished.
 - All file writes and shell commands must go through gateway-owned validation and an ACP permission request before execution.
 - The gateway must fail closed on malformed tool proposals, paths outside the session workspace, unknown permissions, provider UI drift and ambiguous execution outcomes.
 
@@ -46,15 +46,11 @@ Do not expose the current `defaultRegistry` as a trusted coding tool implementat
 
 ```text
 src/acp/
-  index.js                 # stdio entry point; stdout reserved for ACP NDJSON
-  agent-v1.js               # stable ACP v1 server handlers
-  agent-v2.js               # ACP v2 preview handlers (after v1 handshake works)
-  sessions.js               # ACP session ↔ browser session mapping
-  context.js                # project/task context and handoff state
-  tool-protocol.js          # strict JSON envelope parsing and schema validation
-  tool-executor.js          # workspace-scoped file and process tools
-  permissions.js            # ACP requestPermission round-trip
-  persistence.js            # durable session/task/request state
+  index.js                  # stable ACP v1 stdio entry point
+  agent.js                  # ACP lifecycle, provider sessions, tool loop and permissions
+  helpers.js                # prompt/session/provider helpers
+  toolProtocol.js           # strict JSON envelope parser and tool prompt builder
+  toolExecutor.js           # workspace-scoped file and process tools
 ```
 
 The exact split may change after the SDK and T3 handshake prototype. Avoid duplicating browser provider adapters or session logic.
@@ -67,7 +63,8 @@ Use the official TypeScript ACP SDK rather than implementing JSON-RPC framing ma
 - T3 currently prefers ACP v2 preview but supports v1 fallback for agents that have not migrated. Add v2 only after the v1 round-trip is working and test both protocol versions against the actual T3 build.
 - Advertise only capabilities actually implemented.
 - Implement session creation, prompt turns, cancellation, session close and, later, durable session resume/history replay.
-- Use ACP `session/requestPermission` for all file mutations and command execution. An operation executes only when the exact offered allow option is selected.
+- Use ACP `session/requestPermission` for file writes and terminal commands. An operation executes only when the exact offered `allow_once` option is selected; rejection, cancellation, unknown outcomes and request errors all fail closed.
+- `read_file` is available by default and is constrained to the ACP session working directory. `write_file` is disabled by default and requires `BROWSER_AI_ENABLE_FILE_WRITES=1`. `run_command` is disabled by default and requires `BROWSER_AI_ENABLE_COMMANDS=1`.
 - On cancellation, settle every outstanding permission request and report terminal status for every open tool call.
 
 ## Tool protocol and execution safety
@@ -94,8 +91,9 @@ Required checks before dispatch:
 - Reject unknown tool names, extra arguments, duplicate IDs, oversized payloads and malformed JSON.
 - Resolve paths relative to the ACP session cwd and reject traversal or symlink escapes outside the allowed workspace.
 - Use narrow tools (read file, list/search, apply patch/write file, run command) with explicit argument limits.
-- Never use shell string concatenation for structured commands; use argv-based process spawning where practical.
-- Request permission before every mutation and command operation, according to the operation's risk class.
+- Never use shell string concatenation for structured commands; `run_command` uses argv-based process spawning with `shell: false`.
+- Request permission before every file write and command operation.
+- Important limitation: the command's working directory is the project workspace, but this is not an OS sandbox. An approved command can still access other host paths and resources using the gateway process's OS privileges. Keep command execution opt-in and use T3's Supervised permission mode when interactive approval is required.
 - Treat rejection, cancellation, timeout or unknown permission outcomes as not approved.
 - Keep an execution journal. Do not blindly retry a shell side effect after a crash; reconcile whether it ran first.
 
@@ -108,23 +106,26 @@ Required checks before dispatch:
 - On provider switch, transfer the canonical task summary and relevant project context. Do not claim the new provider can see another website's hidden chat history.
 - Handle login expiry, provider rate limits, context exhaustion, browser crash, UI drift, workspace violations and cancellation as distinct states.
 
-## First milestones
+## Implementation milestones
 
-1. **ACP transport proof:** stable v1 Local ACP command starts, initializes and creates a session in T3 without touching the browser.
-2. **Browser proof:** a ChatGPT-backed ACP session creates one browser conversation, prompts it and continues the same conversation for a second turn.
-3. **Permission proof:** a synthetic tool call appears in T3, receives an ACP permission decision and correctly handles allow, reject and cancel. No local execution in this milestone.
-4. **Safe executor:** add workspace-scoped `read_file`, patch/write and argv-based `run_command`, each with validated schemas and permission requests.
-5. **Durability:** persist ACP/browser session mapping, request idempotency and tool execution journal; test process restart and uncertain side effects.
-6. **Provider expansion:** Gemini, DeepSeek, Kimi and Qwen after ChatGPT passes the complete workflow.
+1. **ACP transport and provider modes — implemented in source, not runtime-verified.** Stable ACP v1 stdio entry point, Local ACP command shape, provider choice through ACP session modes.
+2. **Browser conversation mapping — implemented in source, not runtime-verified.** One browser provider session per ACP session; subsequent prompts reuse the same website conversation.
+3. **Strict tool protocol — implemented in source, not runtime-verified.** Only a single fenced `web_ai_tools` JSON envelope is parsed. Plain text is final output; malformed or ambiguous envelopes execute nothing.
+4. **Initial permission-gated executor — implemented in source, not runtime-verified.** `read_file` is workspace-scoped and enabled by default. `write_file` and argv-based `run_command` are opt-in environment capabilities and request ACP permission before execution.
+5. **Validation and safety hardening — in progress.** Unit tests cover protocol validation, tool opt-in, path traversal and symlink handling, but tests have not been run in this environment. Add replay fixtures and verify permission/cancel/restart behavior against T3.
+6. **Durability and recovery — not implemented.** Persist ACP/browser session mapping, request idempotency and tool execution journal; reconcile uncertain command side effects after crashes.
+7. **ACP v2 preview — not implemented.** T3 supports ACP v1 fallback; v2 support can follow once the v1 integration is live-tested.
+8. **Provider expansion — not implemented.** Gemini, DeepSeek, Kimi and Qwen after ChatGPT passes the complete workflow.
 
 ## Acceptance test
 
 - T3 launches this repository as a Local ACP command.
 - ChatGPT Web sign-in is manual in a dedicated persistent browser profile.
 - The same T3 ACP session continues the same browser conversation across turns.
-- T3 displays ACP permission requests for file writes and terminal commands.
-- A denied operation never executes.
-- Approved operations are constrained to the session workspace and return actual results to the same provider conversation.
+- When enabled, T3 receives ACP permission requests for file writes and terminal commands.
+- A denied or cancelled operation never executes.
+- File paths are constrained to the session workspace. Terminal commands start in that workspace but are not OS-sandboxed; users must understand this risk before enabling command execution.
+- Approved operations return actual results to the same provider conversation.
 - Cancellation settles tool calls and stops what can safely be stopped.
 - Restart recovery never blindly repeats an uncertain shell side effect.
 - Invalid tool output and unknown website UI fail closed.
@@ -142,7 +143,11 @@ Required checks before dispatch:
 - [x] ACP process routes console and Pino diagnostics to stderr, keeping stdout for protocol frames.
 - [x] Helper tests added for prompt parsing, provider filtering, defaults, handoff and cwd validation.
 - [ ] ACP v2 preview negotiation not yet implemented; current agent uses stable ACP v1, which T3 documents as a supported fallback.
-- [ ] Structured coding tool protocol, ACP permission round-trip and safe file/terminal executor not yet implemented.
-- [ ] Context/session persistence is currently in-memory; browser/provider history is retained only while the process is running.
+- [x] Strict `web-ai-tools/v1` envelope parser and bounded tool-result handoff added.
+- [x] ACP `session/requestPermission` flow added for file writes and terminal commands; only the explicit `allow_once` response authorizes execution.
+- [x] Workspace-scoped `read_file` and `write_file` checks added, including traversal and symlink checks.
+- [x] argv-based `run_command` added with timeout, output cap and cancellation handling; the tool is disabled by default and is not an OS sandbox.
+- [x] File writes and commands require explicit gateway environment opt-in; read-only file access is enabled by default.
+- [ ] Context/session persistence is currently in-memory; ACP/browser mapping and tool execution journal do not yet survive process restart.
 - [ ] Tests and live T3 handshake not run in this environment; a local clone could not be fetched because this environment could not resolve github.com.
 - Existing `/api/agent` and mock `read_file` are explicitly not considered production-ready for coding execution.
