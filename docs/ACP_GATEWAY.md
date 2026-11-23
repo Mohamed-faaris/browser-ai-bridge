@@ -135,5 +135,14 @@ Required checks before dispatch:
 - Fork verified: `Mohamed-faaris/browser-ai-bridge`.
 - Working branch: `feat/acp-gateway`.
 - Initial code audit completed for the browser, session manager, provider map, existing agent route and startup/login sequence.
-- No ACP SDK or gateway implementation has been committed yet.
+- [x] Official `@agentclientprotocol/sdk` dependency added and locked at 2.9.1.
+- [x] ACP v1 stdio agent committed; T3 can select a web provider through ACP session modes.
+- [x] ACP session ↔ existing browser session mapping implemented in memory; same browser conversation is reused across turns.
+- [x] Browser startup is lazy and avoids the interactive REST-server login wizard; users sign in manually in the launched Chrome window.
+- [x] ACP process routes console and Pino diagnostics to stderr, keeping stdout for protocol frames.
+- [x] Helper tests added for prompt parsing, provider filtering, defaults, handoff and cwd validation.
+- [ ] ACP v2 preview negotiation not yet implemented; current agent uses stable ACP v1, which T3 documents as a supported fallback.
+- [ ] Structured coding tool protocol, ACP permission round-trip and safe file/terminal executor not yet implemented.
+- [ ] Context/session persistence is currently in-memory; browser/provider history is retained only while the process is running.
+- [ ] Tests and live T3 handshake not run in this environment; a local clone could not be fetched because this environment could not resolve github.com.
 - Existing `/api/agent` and mock `read_file` are explicitly not considered production-ready for coding execution.
