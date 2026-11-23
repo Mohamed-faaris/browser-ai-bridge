@@ -11,6 +11,7 @@ import {
   buildCodingPrompt,
   formatWebToolResults,
   parseWebToolResponse,
+  resolveEnabledTools,
 } from "./toolProtocol.js";
 import { executeWorkspaceTool } from "./toolExecutor.js";
 
@@ -31,7 +32,7 @@ export class BrowserAiAcpAgent {
     this.connectToBrowser = connectToBrowser;
     this.sessionManager = sessionManager;
     this.providerConfig = providerConfig;
-    this.providerModes = listProviderModes(providerConfig, providerFilter);
+    this.providerModes = listProviderModes(providerConfig, providerFilter);\n    this.enabledTools = resolveEnabledTools();
     this.defaultProvider = resolveDefaultProvider(this.providerModes, defaultProvider);
     this.sessions = new Map();
     this.browserReady = null;
@@ -136,7 +137,7 @@ export class BrowserAiAcpAgent {
       providerSession.lockedAt = Date.now();
       providerSession.clientGone = false;
 
-      let outboundPrompt = buildCodingPrompt(session.cwd, userPrompt);
+      let outboundPrompt = buildCodingPrompt(session.cwd, userPrompt, this.enabledTools);
       if (session.pendingHandoff) {
         const handoffBudget = Math.max(0, maxPromptChars - userPrompt.length - outboundPrompt.length - 2);
         outboundPrompt = `${session.pendingHandoff.slice(0, handoffBudget)}\n\n${outboundPrompt}`;
@@ -161,7 +162,7 @@ export class BrowserAiAcpAgent {
 
         let parsed;
         try {
-          parsed = parseWebToolResponse(response.text);
+          parsed = parseWebToolResponse(response.text, { enabledTools: this.enabledTools });
         } catch (error) {
           const protocolError =
             `I stopped because the model returned an invalid or ambiguous tool protocol. No requested tool was executed. Details: ${error.message}`;
