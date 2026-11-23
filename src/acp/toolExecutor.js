@@ -23,6 +23,7 @@ async function resolveExistingFile(root, relativePath) {
   if (!isInside(root, actual)) throw new Error("The requested file resolves outside the project workspace.");
   const stat = await fs.stat(actual);
   if (!stat.isFile()) throw new Error("The requested path is not a regular file.");
+  if (stat.nlink > 1) throw new Error("Reading files with multiple hard links is not allowed.");
   return actual;
 }
 
@@ -40,6 +41,7 @@ async function resolveWriteTarget(root, relativePath) {
     const stat = await fs.lstat(target);
     if (stat.isSymbolicLink()) throw new Error("Writing through symbolic links is not allowed.");
     if (!stat.isFile()) throw new Error("The target exists and is not a regular file.");
+    if (stat.nlink > 1) throw new Error("Writing files with multiple hard links is not allowed.");
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
