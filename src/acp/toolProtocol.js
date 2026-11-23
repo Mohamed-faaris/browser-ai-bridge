@@ -23,7 +23,14 @@ function requireString(value, label, maxLength) {
   return value;
 }
 
-export function parseWebToolResponse(responseText) {
+export function resolveEnabledTools(env = process.env) {
+  const enabled = new Set(["read_file"]);
+  if (env.BROWSER_AI_ENABLE_FILE_WRITES === "1") enabled.add("write_file");
+  if (env.BROWSER_AI_ENABLE_COMMANDS === "1") enabled.add("run_command");
+  return enabled;
+}
+
+export function parseWebToolResponse(responseText, { enabledTools = null } = {}) {
   const text = String(responseText || "").trim();
   const blocks = [...text.matchAll(/```web_ai_tools\s*([\s\S]*?)```/gi)];
 
@@ -63,8 +70,7 @@ export function parseWebToolResponse(responseText) {
     if (ids.has(id)) throw new TypeError(`Duplicate tool call id: ${id}`);
     ids.add(id);
     const tool = requireString(call.tool, `tool_calls[${index}].tool`, 64);
-    const args = call.arguments;
-    if (!args || typeof args !== "object" || Array.isArray(args)) {
+    if (enabledTools && !enabledTools.has(tool)) {\n      throw new TypeError(`Tool ${tool} is disabled. Enable it explicitly in the gateway environment before use.`);\n    }\n    const args = call.arguments;\n    if (!args || typeof args !== "object" || Array.isArray(args)) {
       throw new TypeError(`Arguments for ${tool} must be an object.`);
     }
 
@@ -102,15 +108,19 @@ export function parseWebToolResponse(responseText) {
   return { type: "tool_calls", calls };
 }
 
-export function buildCodingPrompt(cwd, userPrompt) {
+export function buildCodingPrompt(cwd, userPrompt, enabledTools = new Set(["read_file"])) {
+  const tools = [
+    enabledTools.has("read_file") && "1. read_file({path}) — read a UTF-8 file relative to the project directory. Reads are workspace-scoped.",
+    enabledTools.has("write_file") && "2. write_file({path, content}) — create or replace a UTF-8 file relative to the project directory. This is sent through the ACP permission flow; T3 applies the thread's permission policy.",
+    enabledTools.has("run_command") && "3. run_command({command, args, timeout_ms?}) — execute a program with an argument array in the project directory (no shell interpolation). This is sent through the ACP permission flow; T3 applies the thread's permission policy.",
+  ].filter(Boolean);
+
   return [
     "You are a coding agent operating through Browser AI Bridge.",
     `The project working directory is: ${cwd}`,
-    "You may inspect or modify project files and run commands only by returning the strict tool protocol below. Do not claim that an operation was performed unless its tool result is returned.",
+    "Use only the tools listed below for project operations. Never claim that an operation was performed unless its tool result is returned.",
     "Available tools:",
-    "1. read_file({path}) — read a UTF-8 file relative to the project directory. Reads are workspace-scoped.",
-    "2. write_file({path, content}) — create or replace a UTF-8 file relative to the project directory. This is sent through the ACP permission flow; T3 applies the thread's permission policy.",
-    "3. run_command({command, args, timeout_ms?}) — execute a program with an argument array in the project directory (no shell interpolation). This is sent through the ACP permission flow; T3 applies the thread's permission policy.",
+    ...tools,
     "When you need tools, respond with exactly one fenced web_ai_tools block and no surrounding prose:",
     "```web_ai_tools",
     JSON.stringify({
