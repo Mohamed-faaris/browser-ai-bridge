@@ -1,5 +1,6 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { AcpSessionStore } from "./sessionStore.js";
 import {
   buildHandoffPrompt,
   listProviderModes,
@@ -27,10 +28,12 @@ export class BrowserAiAcpAgent {
     providerConfig,
     providerFilter = process.env.BROWSER_AI_PROVIDERS,
     defaultProvider = process.env.BROWSER_AI_PROVIDER || "chatgpt",
+    sessionStore = new AcpSessionStore(),
   }) {
     this.acp = acp;
     this.connectToBrowser = connectToBrowser;
     this.sessionManager = sessionManager;
+    this.sessionStore = sessionStore;
     this.providerConfig = providerConfig;
     this.providerModes = listProviderModes(providerConfig, providerFilter);
     this.enabledTools = resolveEnabledTools();
@@ -43,26 +46,30 @@ export class BrowserAiAcpAgent {
   initialize() {
     return {
       protocolVersion: this.acp.PROTOCOL_VERSION,
-      agentCapabilities: { loadSession: false },
+      agentCapabilities: { loadSession: true },
       agentInfo: { name: AGENT_NAME, version: AGENT_VERSION },
     };
   }
 
-  newSession(params) {
+  async newSession(params) {
     const cwd = validateWorkingDirectory(params.cwd);
     const sessionId = randomUUID();
-
-    this.sessions.set(sessionId, {
+    const session = {
       id: sessionId,
       cwd,
       providerId: this.defaultProvider,
       providerSessionId: null,
       turnNumber: 0,
       activeTurn: null,
+      turnInProgress: false,
       history: [],
+      events: [],
       pendingHandoff: null,
-    });
-
+      createdAt: Date.now(),
+      deleted: false,
+    };
+    await this.persistSession(session);
+    this.sessions.set(sessionId, session);
     return {
       sessionId,
       modes: {
@@ -70,6 +77,139 @@ export class BrowserAiAcpAgent {
         availableModes: this.providerModes,
       },
     };
+  }
+
+  async persistSession(session) {
+    if (!session || session.deleted || !this.sessionStore) return;
+    await this.sessionStore.save({
+      id: session.id,
+      cwd: session.cwd,
+      providerId: session.providerId,
+      turnNumber: session.turnNumber,
+      history: session.history,
+      pendingHandoff: session.pendingHandoff,
+      events: session.events || [],
+      turnInProgress: session.turnInProgress === true || Boolean(session.activeTurn),
+      createdAt: session.createdAt,
+    });
+  }
+
+  async loadSession(params, client) {
+    const sessionId = String(params.sessionId || "");
+    let session = this.sessions.get(sessionId);
+    if (!session) {
+      const stored = await this.sessionStore.load(sessionId);
+      if (!stored) throw this.acp.RequestError.sessionNotFound(sessionId);
+      const requestedCwd = validateWorkingDirectory(params.cwd);
+      if (path.resolve(stored.cwd) !== requestedCwd) {
+        throw this.acp.RequestError.invalidParams(
+          { sessionId, cwd: params.cwd },
+          "The requested working directory does not match the persisted ACP session.",
+        );
+      }
+      if (!this.providerModes.some((mode) => mode.id === stored.providerId)) {
+        throw this.acp.RequestError.invalidParams(
+          { sessionId, providerId: stored.providerId },
+          "The provider used by this saved session is not enabled. Re-enable it in BROWSER_AI_PROVIDERS and retry.",
+        );
+      }
+      session = {
+        ...stored,
+        providerSessionId: null,
+        activeTurn: null,
+        turnInProgress: stored.turnInProgress === true,
+        events: Array.isArray(stored.events) ? stored.events : [],
+        deleted: false,
+      };
+      this.sessions.set(sessionId, session);
+    } else {
+      const requestedCwd = validateWorkingDirectory(params.cwd);
+      if (requestedCwd !== path.resolve(session.cwd)) {
+        throw this.acp.RequestError.invalidParams(
+          { sessionId, cwd: params.cwd },
+          "The requested working directory does not match the active ACP session.",
+        );
+      }
+    }
+
+    if (session.activeTurn) {
+      throw this.acp.RequestError.invalidParams(
+        { sessionId },
+        "Cannot load an ACP session while one of its turns is running.",
+      );
+    }
+
+    // Browser/provider tabs are process-local. Recover the task from the
+    // transcript and create a new provider conversation on the next prompt.
+    if (!session.providerSessionId && session.history.length && !session.pendingHandoff) {
+      session.pendingHandoff = buildHandoffPrompt(
+        session.history,
+        session.providerId,
+        session.providerId,
+      );
+    }
+
+    if (session.turnInProgress) {
+      this.reconcileInterruptedToolCalls(session);
+      const recoveryNotice =
+        "The gateway restarted while the previous turn was active. That turn was not resumed automatically. Any tool call that had reached in_progress has an unknown outcome; inspect its effects before retrying. Pending permission requests were not executed.";
+      session.history.push({ role: "assistant", content: recoveryNotice });
+      this.trimHistory(session);
+      session.events.push({
+        sessionUpdate: "agent_message_chunk",
+        messageId: randomUUID(),
+        content: { type: "text", text: recoveryNotice },
+      });
+      session.turnInProgress = false;
+    }
+
+    await this.persistSession(session);
+    for (const update of session.events) {
+      await client.notify(this.acp.methods.client.session.update, {
+        sessionId,
+        update,
+      });
+    }
+    return {
+      modes: {
+        currentModeId: session.providerId,
+        availableModes: this.providerModes,
+      },
+    };
+  }
+
+  reconcileInterruptedToolCalls(session) {
+    const latest = new Map();
+    for (const update of session.events) {
+      if (update?.sessionUpdate === "tool_call" && update.toolCallId) {
+        latest.set(update.toolCallId, { status: update.status, name: update.name });
+      } else if (update?.sessionUpdate === "tool_call_update" && update.toolCallId) {
+        const previous = latest.get(update.toolCallId) || {};
+        latest.set(update.toolCallId, { ...previous, status: update.status });
+      }
+    }
+    for (const [toolCallId, tool] of latest) {
+      if (tool.status !== "pending" && tool.status !== "in_progress") continue;
+      const uncertain = tool.status === "in_progress";
+      const output = uncertain
+        ? "The gateway restarted while this operation was in progress. Its outcome is unknown; inspect the workspace and running processes before retrying. The gateway did not retry it."
+        : "The gateway restarted before this operation was approved for execution. It was not executed.";
+      session.events.push({
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "failed",
+        content: [{
+          type: "content",
+          content: { type: "text", text: output },
+        }],
+        rawOutput: {
+          status: "interrupted",
+          outcome: uncertain ? "unknown" : "not_executed",
+          output,
+          tool: tool.name || "unknown",
+        },
+      });
+    }
   }
 
   authenticate() {
@@ -99,6 +239,7 @@ export class BrowserAiAcpAgent {
     session.pendingHandoff = buildHandoffPrompt(session.history, previousProvider, nextProvider);
     await this.releaseProviderSession(session);
     session.providerId = nextProvider;
+    await this.persistSession(session);
     return {};
   }
 
@@ -129,12 +270,19 @@ export class BrowserAiAcpAgent {
 
     const activeTurn = { cancelled: false, controller: new AbortController() };
     session.activeTurn = activeTurn;
+    session.turnInProgress = true;
     session.turnNumber += 1;
     session.history.push({ role: "user", content: userPrompt });
+    session.events.push({
+      sessionUpdate: "user_message_chunk",
+      messageId: randomUUID(),
+      content: { type: "text", text: userPrompt },
+    });
     this.trimHistory(session);
 
     let providerSession = null;
     try {
+      await this.persistSession(session);
       providerSession = await this.ensureProviderSession(session);
       providerSession.locked = true;
       providerSession.lockedAt = Date.now();
@@ -170,6 +318,7 @@ export class BrowserAiAcpAgent {
             `I stopped because the model returned an invalid or ambiguous tool protocol. No requested tool was executed. Details: ${error.message}`;
           await this.sendAssistantText(client, session.id, protocolError);
           session.history.push({ role: "assistant", content: protocolError });
+          await this.persistSession(session);
           return { stopReason: "end_turn" };
         }
 
@@ -179,6 +328,7 @@ export class BrowserAiAcpAgent {
           session.history.push({ role: "assistant", content: finalText });
           this.trimHistory(session);
           session.pendingHandoff = null;
+          await this.persistSession(session);
           return { stopReason: "end_turn" };
         }
 
@@ -200,6 +350,7 @@ export class BrowserAiAcpAgent {
           content: JSON.stringify({ tool_results: results }),
         });
         this.trimHistory(session);
+        await this.persistSession(session);
         outboundPrompt = formatWebToolResults(
           results,
           maxPromptChars > 0 ? Math.max(2000, maxPromptChars - 2500) : 60000,
@@ -218,6 +369,8 @@ export class BrowserAiAcpAgent {
 
       const message = `Browser AI Gateway error: ${error?.message || String(error)}`;
       await this.sendAssistantText(client, session.id, message).catch(() => {});
+      session.history.push({ role: "assistant", content: message });
+      await this.persistSession(session).catch(() => {});
       return { stopReason: "end_turn" };
     } finally {
       if (providerSession) {
@@ -225,6 +378,10 @@ export class BrowserAiAcpAgent {
         providerSession.lockedAt = null;
       }
       if (session.activeTurn === activeTurn) session.activeTurn = null;
+      session.turnInProgress = false;
+      await this.persistSession(session).catch((error) => {
+        console.error("[ACP] Could not persist completed turn: " + (error?.message || error));
+      });
     }
   }
 
@@ -413,6 +570,11 @@ export class BrowserAiAcpAgent {
   }
 
   async updateToolCall(client, sessionId, update) {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.events.push(JSON.parse(JSON.stringify(update)));
+      await this.persistSession(session);
+    }
     return client.notify(this.acp.methods.client.session.update, {
       sessionId,
       update,
@@ -420,12 +582,19 @@ export class BrowserAiAcpAgent {
   }
 
   async sendAssistantText(client, sessionId, text) {
+    const update = {
+      sessionUpdate: "agent_message_chunk",
+      messageId: randomUUID(),
+      content: { type: "text", text: String(text || "") },
+    };
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.events.push(update);
+      await this.persistSession(session);
+    }
     return client.notify(this.acp.methods.client.session.update, {
       sessionId,
-      update: {
-        sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: String(text || "") },
-      },
+      update,
     });
   }
 
@@ -525,6 +694,7 @@ export class BrowserAiAcpAgent {
         session.activeTurn.cancelled = true;
         session.activeTurn.controller.abort(new Error("ACP session closed."));
       }
+      await this.persistSession(session);
       await this.releaseProviderSession(session, { forceClose: true });
       this.sessions.delete(params.sessionId);
     }
@@ -532,13 +702,20 @@ export class BrowserAiAcpAgent {
   }
 
   async deleteSession(params) {
-    return this.closeSession(params);
+    const session = this.sessions.get(params.sessionId);
+    if (session) session.deleted = true;
+    await this.closeSession(params);
+    await this.sessionStore.delete(params.sessionId);
+    return {};
   }
 
   async shutdown() {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     for (const session of this.sessions.values()) {
+      await this.persistSession(session).catch((error) => {
+        console.error("[ACP] Could not persist session during shutdown: " + (error?.message || error));
+      });
       if (session.activeTurn) {
         session.activeTurn.cancelled = true;
         session.activeTurn.controller.abort(new Error("ACP gateway shutting down."));

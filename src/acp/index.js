@@ -35,6 +35,9 @@ const agent = acp
   .onRequest(acp.methods.agent.session.new, ({ params }) =>
     implementation.newSession(params),
   )
+  .onRequest(acp.methods.agent.session.load, ({ params, client }) =>
+    implementation.loadSession(params, client),
+  )
   .onRequest(acp.methods.agent.authenticate, () =>
     implementation.authenticate(),
   )
