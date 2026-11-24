@@ -210,10 +210,8 @@ test("session/load marks interrupted tool operations without retrying them", asy
   assert.equal(finalToolUpdate.status, "failed");
   assert.equal(finalToolUpdate.rawOutput.outcome, "unknown");
   assert.equal(restored.turnInProgress, false);
-  assert.equal(
-    client.notifications.some((entry) =>
-      String(entry.params.update.content?.text || "").includes("outcome is unknown"),
-    ),
-    true,
+  const replayedToolUpdate = client.notifications.find(
+    (entry) => entry.params.update.toolCallId === "tool-call-1",
   );
+  assert.equal(replayedToolUpdate.params.update.rawOutput.outcome, "unknown");
 });
